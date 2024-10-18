@@ -9,6 +9,9 @@ class KGInfo:
         self.kg = kwargs["kg"]
         self.tail_len = kwargs["tail_len"]
         self.relation_len = kwargs["relation_len"]
+    
+    def get(self):
+        return self.kg, self.tail_len, self.relation_len
 
 class DDIDataset(Dataset):
     def __init__(self,x,y):
@@ -22,9 +25,8 @@ class DDIDataset(Dataset):
 
 class MultiDataLoader:
     # feature_list = ["drugbank", "smile", "MACCS"]
-    def __init__(self, df_drug, feature_list, mechanism, action, drugA, drugB):
+    def __init__(self, df_drug, mechanism, action, drugA, drugB):
         self.df_drug = df_drug
-        self.feature_list = feature_list
         self.mechanism = mechanism
         self.action = action
         self.drugA = drugA

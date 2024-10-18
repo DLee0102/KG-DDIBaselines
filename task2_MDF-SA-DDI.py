@@ -44,15 +44,14 @@ from pytorchtools import BalancedDataParallel
 from radam import RAdam
 import torch.nn.functional as F
 
-
-from utils.data_loader import KGInfo, DDIDataset, MultiDataLoader
-
+import networkx as nx
 
 import warnings
 warnings.filterwarnings("ignore")
 
 import os
 
+from utils.data_loader import KGInfo, DDIDataset, MultiDataLoader
 
 
 # In[102]:
@@ -81,6 +80,7 @@ def prepare(df_drug, feature_list,mechanism,action,drugA,drugB):
     for i in range(len(mechanism)):
         d_event.append(mechanism[i]+" "+action[i])
 
+
     count={}
     for i in d_event:
         if i in count:
@@ -89,10 +89,9 @@ def prepare(df_drug, feature_list,mechanism,action,drugA,drugB):
             count[i]=1
     event_num=len(count)
     list1 = sorted(count.items(), key=lambda x: x[1],reverse=True)
-    each_event_num=[]
     for i in range(len(list1)):
         d_label[list1[i][0]]=i
-        each_event_num.append(list1[i][1])
+
 
     vector = np.zeros((len(np.array(df_drug['name']).tolist()), 0), dtype=float)  #vector=[]
     for i in feature_list:
@@ -112,10 +111,11 @@ def prepare(df_drug, feature_list,mechanism,action,drugA,drugB):
         new_feature.append(temp)
         new_label.append(d_label[d_event[i]])
 
+        
     new_feature = np.array(new_feature) #323539*....
     new_label = np.array(new_label)  #323539
 
-    return new_feature, new_label, drugA,drugB,event_num,each_event_num
+    return new_feature, new_label, drugA,drugB,event_num
 
 
 # In[104]:
@@ -151,7 +151,9 @@ def feature_vector(feature_name, df):
     sys.stdout.flush()
     return sim_matrix
 
+
 # In[106]:
+
 
 class MultiHeadAttention(torch.nn.Module):
     def __init__(self,input_dim,n_heads,ouput_dim=None):
@@ -169,7 +171,6 @@ class MultiHeadAttention(torch.nn.Module):
         self.fc = torch.nn.Linear(self.n_heads * self.d_v, self.ouput_dim, bias=False)
     def forward(self,X):
         ## (S, D) -proj-> (S, D_new) -split-> (S, H, W) -trans-> (H, S, W)
-        # Bug Here
         Q=self.W_Q(X).view( -1, self.n_heads, self.d_k).transpose(0,1)
         K=self.W_K(X).view( -1, self.n_heads, self.d_k).transpose(0,1)
         V=self.W_V(X).view( -1, self.n_heads, self.d_v).transpose(0,1)
@@ -216,265 +217,288 @@ def gelu(x):
 # In[109]:
 
 
+class AE1(torch.nn.Module): #Joining together
+    def __init__(self,vector_size):
+        super(AE1,self).__init__()
+        
+        self.vector_size=vector_size
+        
+        self.l1 = torch.nn.Linear(self.vector_size,(self.vector_size+len_after_AE)//2)
+        self.bn1 = torch.nn.BatchNorm1d((self.vector_size+len_after_AE)//2)
+        
+        self.att2=EncoderLayer((self.vector_size+len_after_AE)//2,bert_n_heads)
+        self.l2 = torch.nn.Linear((self.vector_size+len_after_AE)//2,len_after_AE)
+        
+        self.l3 = torch.nn.Linear(len_after_AE,(self.vector_size+len_after_AE)//2)
+        self.bn3 = torch.nn.BatchNorm1d((self.vector_size+len_after_AE)//2)
+        
+        self.l4 = torch.nn.Linear((self.vector_size+len_after_AE)//2,self.vector_size)
+        
+        self.dr = torch.nn.Dropout(drop_out_rating)
+        self.ac=gelu
+        
+    def forward(self,X):
+        
+        X=self.dr(self.bn1(self.ac(self.l1(X))))
+        
+        X=self.att2(X)
+        X=self.l2(X)
+        
+        X_AE=self.dr(self.bn3(self.ac(self.l3(X))))
+        
+        X_AE=self.l4(X_AE)
+        
+        return X,X_AE
+
+
+# In[110]:
+
+
+class AE2(torch.nn.Module):# twin network
+    def __init__(self,vector_size):
+        super(AE2,self).__init__()
+        
+        self.vector_size=vector_size//2
+        
+        self.l1 = torch.nn.Linear(self.vector_size,(self.vector_size+len_after_AE//2)//2)
+        self.bn1 = torch.nn.BatchNorm1d((self.vector_size+len_after_AE//2)//2)
+        
+        self.att2=EncoderLayer((self.vector_size+len_after_AE//2)//2,bert_n_heads)
+        self.l2 = torch.nn.Linear((self.vector_size+len_after_AE//2)//2,len_after_AE//2)
+        
+        self.l3 = torch.nn.Linear(len_after_AE//2,(self.vector_size+len_after_AE//2)//2)
+        self.bn3 = torch.nn.BatchNorm1d((self.vector_size+len_after_AE//2)//2)
+        
+        self.l4 = torch.nn.Linear((self.vector_size+len_after_AE//2)//2,self.vector_size)
+        
+        self.dr = torch.nn.Dropout(drop_out_rating)
+        
+        self.ac=gelu
+        
+    def forward(self,X):
+        
+        X1=X[:,0:self.vector_size]
+        X2=X[:,self.vector_size:]
+        
+        X1=self.dr(self.bn1(self.ac(self.l1(X1))))
+        X1=self.att2(X1)
+        X1=self.l2(X1)
+        X_AE1=self.dr(self.bn3(self.ac(self.l3(X1))))
+        X_AE1=self.l4(X_AE1)
+        
+        X2=self.dr(self.bn1(self.ac(self.l1(X2))))
+        X2=self.att2(X2)
+        X2=self.l2(X2)
+        X_AE2=self.dr(self.bn3(self.ac(self.l3(X2))))
+        X_AE2=self.l4(X_AE2)
+        
+        X=torch.cat((X1,X2), 1)
+        X_AE=torch.cat((X_AE1,X_AE2), 1)
+        
+        return X,X_AE
+
+
+# In[111]:
+
+
+class cov(torch.nn.Module):
+    def __init__(self,vector_size):
+        super(cov,self).__init__()
+        
+        self.vector_size=vector_size
+        
+        self.co2_1=torch.nn.Conv2d(1, 1, kernel_size=(2,cov2KerSize))
+        self.co1_1=torch.nn.Conv1d(1, 1, kernel_size=cov1KerSize)
+        self.pool1=torch.nn.AdaptiveAvgPool1d(len_after_AE)
+        
+        self.ac=gelu
+        
+        
+    def forward(self,X):
+        
+        X1=X[:,0:self.vector_size//2]
+        X2=X[:,self.vector_size//2:]
+        
+        X=torch.cat((X1,X2), 0)
+        
+        X=X.view(-1,1,2,self.vector_size//2)
+        
+        X=self.ac(self.co2_1(X))
+        
+        X=X.view(-1,self.vector_size//2-cov2KerSize+1, 1)  
+        X=X.permute(0,2,1)
+        X=self.ac(self.co1_1(X))
+        
+        X=self.pool1(X)
+        
+        X=X.contiguous().view(-1,len_after_AE)
+        
+        return X
 
 
 # In[112]:
 
-class feature_encoder(torch.nn.Module):  # twin network
-    def __init__(self, vector_size,n_heads,n_layers):
-        super(feature_encoder, self).__init__()
 
-        self.layers = torch.nn.ModuleList([EncoderLayer(vector_size, n_heads) for _ in range(n_layers)])
-        self.AN = torch.nn.LayerNorm(vector_size)
-
-        self.l1 = torch.nn.Linear(vector_size, vector_size // 2)
-        self.bn1 = torch.nn.BatchNorm1d(vector_size // 2)
-
-        self.l2 = torch.nn.Linear(vector_size // 2, vector_size // 4)
-
-        self.l3 = torch.nn.Linear(vector_size // 4, vector_size//2)
-        self.bn3 = torch.nn.BatchNorm1d(vector_size // 2)
-
-        self.l4 = torch.nn.Linear(vector_size // 2, vector_size )
-
-
+class ADDAE(torch.nn.Module):
+    def __init__(self,vector_size):
+        super(ADDAE,self).__init__()
+        
+        self.vector_size=vector_size//2
+        
+        self.l1 = torch.nn.Linear(self.vector_size,(self.vector_size+len_after_AE)//2)
+        self.bn1 = torch.nn.BatchNorm1d((self.vector_size+len_after_AE)//2)
+        
+        self.att1=EncoderLayer((self.vector_size+len_after_AE)//2,bert_n_heads)
+        self.l2 = torch.nn.Linear((self.vector_size+len_after_AE)//2,len_after_AE)
+        #self.att2=EncoderLayer(len_after_AE//2,bert_n_heads)
+        
+        self.l3 = torch.nn.Linear(len_after_AE,(self.vector_size+len_after_AE)//2)
+        self.bn3 = torch.nn.BatchNorm1d((self.vector_size+len_after_AE)//2)
+        
+        self.l4 = torch.nn.Linear((self.vector_size+len_after_AE)//2,self.vector_size)
+        
         self.dr = torch.nn.Dropout(drop_out_rating)
-
-        self.ac = gelu
-
-    def forward(self, X):
-
-        for layer in self.layers:
-            X = layer(X)
-        X1=self.AN(X)
-        X2 = self.dr(self.bn1(self.ac(self.l1(X1))))
-        X3 = self.l2(X2)
-
-        X4 = self.dr(self.bn3(self.ac(self.l3(self.ac(X3)))))
-        X5 = self.l4(X4)
-
-        return X1,X2,X3,X5
-class feature_encoder2(torch.nn.Module):  # twin network
-    def __init__(self, vector_size):
-        super(feature_encoder2, self).__init__()
-
-        self.l1 = torch.nn.Linear(vector_size, vector_size // 2)
-        self.bn1 = torch.nn.BatchNorm1d(vector_size // 2)
-
-        self.l2 = torch.nn.Linear(vector_size // 2, vector_size // 4)
-        self.bn2 = torch.nn.BatchNorm1d(vector_size // 4)
-
-        self.dr = torch.nn.Dropout(drop_out_rating)
-
-        self.ac = gelu
-
-    def forward(self, X):
-
-        X = self.dr(self.bn1(self.ac(self.l1(X))))
-
-        X = self.dr(self.bn2(self.ac(self.l2(X))))
-
-        return X
-class Model(torch.nn.Module):
-    def __init__(self,input_dim,n_heads,n_layers,event_num):
-        super(Model, self).__init__()
-
-        self.input_dim = input_dim
-        self.drugEncoder_input_dim=self.input_dim//2
-
-        self.drugEncoderA=feature_encoder(self.drugEncoder_input_dim,n_heads,n_layers)
-        self.drugEncoderB = feature_encoder(self.drugEncoder_input_dim, n_heads, n_layers)
-
-        self.feaEncoder1_3_input_dim=self.drugEncoder_input_dim+self.drugEncoder_input_dim//4
-        self.feaEncoder2_input_dim = self.drugEncoder_input_dim//2 + self.drugEncoder_input_dim// 2
-
-        self.feaEncoder1 = feature_encoder2(self.feaEncoder1_3_input_dim)
-        self.feaEncoder2 = feature_encoder2(self.feaEncoder2_input_dim)
-        self.feaEncoder3 = feature_encoder2(self.feaEncoder1_3_input_dim)
-
-        self.feaEncoder1_3_output_dim = self.feaEncoder1_3_input_dim//4
-        self.feaEncoder2_output_dim = self.feaEncoder2_input_dim//4
-
-        self.feaFui_input_dim = self.feaEncoder1_3_output_dim*2+self.feaEncoder2_output_dim+self.drugEncoder_input_dim//4*2
-
-        self.feaFui = feature_encoder(self.feaFui_input_dim, n_heads, n_layers)
-
-        self.linear_input_dim = self.feaFui_input_dim//4+self.feaFui_input_dim
-
-        self.l1=torch.nn.Linear(self.linear_input_dim,(self.linear_input_dim+event_num)//2)
-        self.bn1=torch.nn.BatchNorm1d((self.linear_input_dim+event_num)//2)
-
-        self.l2 = torch.nn.Linear((self.linear_input_dim+event_num)//2, event_num)
         
         self.ac=gelu
-
-        self.dr = torch.nn.Dropout(drop_out_rating)
-
         
-    def forward(self, X):
-        XA = X[:, 0:self.input_dim//2]
-        XB = X[:, self.input_dim//2:]
-
-        XA1,XA2,XA3,XAC=self.drugEncoderA(XA)
-        XB1, XB2, XB3 ,XBC= self.drugEncoderB(XB)
-
-        XDC = torch.cat((XAC, XBC), 1)
-
-        X1 = torch.cat((XA1,XB3), 1)
-        X2 = torch.cat((XA2, XB2), 1)
-        X3 = torch.cat((XA3, XB1), 1)
-
-        X1=self.feaEncoder1(X1)
-        X2 = self.feaEncoder2(X2)
-        X3 = self.feaEncoder3(X3)
-
-        XC = torch.cat((X1, X2, X3,XA3,XB3), 1)
-        _,_,XC,_=self.feaFui(XC)
-
-        X = torch.cat((XA3,XB3,X1, X2, X3,XC), 1)
-
+    def forward(self,X):
+        
+        X1=X[:,0:self.vector_size]
+        X2=X[:,self.vector_size:]
+        X=X1+X2
+        
         X=self.dr(self.bn1(self.ac(self.l1(X))))
-
+        
+        X=self.att1(X)
         X=self.l2(X)
         
-        return X,XC,XDC
+        X_AE=self.dr(self.bn3(self.ac(self.l3(X))))
+        
+        X_AE=self.l4(X_AE)
+        X_AE=torch.cat((X_AE,X_AE), 1)
+        
+        return X,X_AE
+
+
+# In[113]:
+
+
+class BERT(torch.nn.Module):
+    def __init__(self,input_dim,n_heads,n_layers,event_num):
+        super(BERT, self).__init__()
+        
+        self.ae1=AE1(input_dim)  #Joining together
+        self.ae2=AE2(input_dim)#twin loss
+        self.cov=cov(input_dim)#cov 
+        self.ADDAE=ADDAE(input_dim)
+        
+        self.dr = torch.nn.Dropout(drop_out_rating)
+        self.input_dim=input_dim
+        
+        self.layers = torch.nn.ModuleList([EncoderLayer(len_after_AE*5,n_heads) for _ in range(n_layers)])
+        self.AN=torch.nn.LayerNorm(len_after_AE*5)
+        
+        self.l1=torch.nn.Linear(len_after_AE*5,(len_after_AE*5+event_num)//2)
+        self.bn1=torch.nn.BatchNorm1d((len_after_AE*5+event_num)//2)
+        
+        self.l2=torch.nn.Linear((len_after_AE*5+event_num)//2,event_num)
+        
+        self.ac=gelu
+        
+    def forward(self, X):
+        X1,X_AE1=self.ae1(X)
+        X2,X_AE2=self.ae2(X)
+        
+        X3=self.cov(X)
+        
+        X4,X_AE4=self.ADDAE(X)
+        
+        X5=X1+X2+X3+X4
+        
+        X=torch.cat((X1,X2,X3,X4,X5), 1)
+        
+        for layer in self.layers:
+            X = layer(X)
+        X=self.AN(X)
+        
+        X=self.dr(self.bn1(self.ac(self.l1(X))))
+        
+        X=self.l2(X)
+        
+        return X,X_AE1,X_AE2,X_AE4
 
 
 # In[114]:
-class LabelSmoothing(nn.Module):
-    "Implement label smoothing.  size=class number  "
 
-    def __init__(self, size, smoothing=0.0):
-        super(LabelSmoothing, self).__init__()
-
-        self.criterion = nn.KLDivLoss(size_average=False)
-
-        self.confidence = 1.0 - smoothing
-
-        self.smoothing = smoothing
-
-        self.size = size
-
-        self.true_dist = None
-
-        self.Logsoftmax = nn.LogSoftmax()
-
-    def forward(self, x, target):
-
-        x = self.Logsoftmax(x)
-
-        assert x.size(1) == self.size
-        true_dist = x.data.clone()
-
-        true_dist.fill_(self.smoothing / (self.size - 1))
-
-        true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
-
-        self.true_dist = true_dist
-
-        return self.criterion(x, torch.autograd.Variable(true_dist, requires_grad=False).to(device))
 
 class focal_loss(nn.Module):
-    def __init__(self, alpha=0.25, gamma=2, num_classes=3, size_average=True):
-
+    def __init__(self, gamma=2):
+        
         super(focal_loss,self).__init__()
-        self.size_average = size_average
-        if isinstance(alpha, list):
-            assert len(alpha) == num_classes
-            self.alpha = torch.Tensor(alpha)
-        else:
-            assert alpha < 1
-            self.alpha = torch.zeros(num_classes)
-            self.alpha[0] += alpha
-            self.alpha[1:] += (1-alpha)
-
+        
         self.gamma = gamma
 
     def forward(self, preds, labels):
-
+        
+        # assert preds.dim() == 2 and labels.dim()==1
         labels = labels.view(-1, 1) # [B * S, 1]
         preds = preds.view(-1, preds.size(-1)) # [B * S, C]
-        self.alpha = self.alpha.to(preds.device)
-        preds_logsoft = F.log_softmax(preds, dim=1)
-        preds_softmax = torch.exp(preds_logsoft)
+        
+        preds_logsoft = F.log_softmax(preds, dim=1) # 先softmax, 然后取log
+        preds_softmax = torch.exp(preds_logsoft)    # softmax
 
-        preds_softmax = preds_softmax.gather(1, labels)
+        preds_softmax = preds_softmax.gather(1, labels)   # 这部分实现nll_loss ( crossempty = log_softmax + nll )
         preds_logsoft = preds_logsoft.gather(1, labels)
-        alpha = self.alpha.gather(0, labels.view(-1))
-        loss = -torch.mul(torch.pow((1-preds_softmax), self.gamma), preds_logsoft)
-
-        loss = torch.mul(alpha, loss.t())
-        if self.size_average:
-            loss = loss.mean()
-        else:
-            loss = loss.sum()
-        return loss
-
-class con_loss(nn.Module):
-    def __init__(self, T=0.05):
-        super(con_loss, self).__init__()
-
-        self.T = T
-
-    def forward(self, representations, label):
-        n = label.shape[0]
-        similarity_matrix = F.cosine_similarity(representations.unsqueeze(1), representations.unsqueeze(0), dim=2)
-        mask = torch.ones_like(similarity_matrix) * (label.expand(n, n).eq(label.expand(n, n).t()))
-        mask_no_sim = torch.ones_like(mask) - mask
-
-        mask_dui_jiao_0 = (torch.ones(n, n) - torch.eye(n, n)).to(device)
-
-        similarity_matrix = torch.exp(similarity_matrix / self.T)
-
-        similarity_matrix = similarity_matrix * mask_dui_jiao_0
-
-        sim = mask * similarity_matrix
-
-        no_sim = similarity_matrix - sim
-
-        no_sim_sum = torch.sum(no_sim, dim=1)
-
-        no_sim_sum_expend = no_sim_sum.repeat(n, 1).T
-        sim_sum = sim + no_sim_sum_expend
-        loss = torch.div(sim, sim_sum)
-        loss = mask_no_sim + loss + torch.eye(n, n).to(device)
-        loss = -torch.log(loss)
-        loss = torch.sum(torch.sum(loss, dim=1)) / (2 * n)
-
+        
+        loss = -torch.mul(torch.pow((1-preds_softmax), self.gamma), preds_logsoft)  # torch.pow((1-preds_softmax), self.gamma) 为focal loss中 (1-pt)**γ
+        
+        loss = loss.mean()
+        
         return loss
 class my_loss1(nn.Module):
-    def __init__(self,classNum):
+    def __init__(self):
         
         super(my_loss1,self).__init__()
         
-        self.criteria1 = LabelSmoothing(classNum, smoothing=label_smoothing)
+        self.criteria1 = torch.nn.CrossEntropyLoss()
         self.criteria2=torch.nn.MSELoss()
-        self.criteria3 = con_loss(T=con_loss_T)
 
-    def forward(self, X, target,XC,XDC,inputs):
+    def forward(self, X, target,inputs,X_AE1,X_AE2,X_AE4):
 
-        loss=self.criteria1(X,target)+ \
-             10*self.criteria2(inputs.float(), XDC)+\
-             0.1*self.criteria3(XC,target)
 
+        
+        loss=calssific_loss_weight*self.criteria1(X,target)+\
+             self.criteria2(inputs.float(),X_AE1)+\
+             self.criteria2(inputs.float(),X_AE2)+\
+             self.criteria2(inputs.float(),X_AE4)
         return loss
 class my_loss2(nn.Module):
-    def __init__(self,classNum,each_num_wei):
+    def __init__(self):
         
         super(my_loss2,self).__init__()
         
-        self.criteria1 = focal_loss(alpha=each_num_wei,num_classes=classNum)
+        self.criteria1 = focal_loss()
         self.criteria2=torch.nn.MSELoss()
-        self.criteria3 = con_loss(T=con_loss_T)
 
-    def forward(self, X, target,XC,XDC,inputs):
-        loss = self.criteria1(X, target) + \
-               10*self.criteria2(inputs.float(), XDC) + \
-               0.1*self.criteria3(XC, target)
+    def forward(self, X, target,inputs,X_AE1,X_AE2,X_AE4):
+
+        loss=calssific_loss_weight*self.criteria1(X,target)+\
+             self.criteria2(inputs.float(),X_AE1)+\
+             self.criteria2(inputs.float(),X_AE2)+\
+             self.criteria2(inputs.float(),X_AE4)
         return loss
 
 
-def BERT_train(model,x_train,y_train,x_test,y_test,event_num,each_num_wei):
+
+
+def mixup(x1, x2, y1, y2, alpha):
+    beta = np.random.beta(alpha, alpha)
+    x = beta * x1 + (1 - beta) * x2
+    y = beta * y1 + (1 - beta) * y2
+    return x, y
+
+#writer = SummaryWriter("./tbx")
+def BERT_train(model,x_train,y_train,x_test,y_test,event_num):
 
     model_optimizer=RAdam(model.parameters(),lr=learn_rating,weight_decay=weight_decay_rate)
     model=torch.nn.DataParallel(model)
@@ -493,31 +517,47 @@ def BERT_train(model,x_train,y_train,x_test,y_test,event_num,each_num_wei):
     print("test len", len(y_test))
     sys.stdout.flush()
 
+
     train_dataset = DDIDataset(x_train,np.array(y_train))
     test_dataset = DDIDataset(x_test,np.array(y_test))
     train_loader=DataLoader(dataset=train_dataset,batch_size=batch_size,shuffle=True)
     test_loader=DataLoader(dataset=test_dataset,batch_size=batch_size,shuffle=False)
 
+
     for epoch in range(epo_num):
         if epoch<epoch_changeloss:
-            my_loss=my_loss1(event_num)
+            my_loss=my_loss1()
         else:
-            my_loss=my_loss2(event_num,each_num_wei)
-
+            my_loss=my_loss2()
+        
         running_loss = 0.0
 
+
+        
         model.train()
         for batch_idx,data in enumerate(train_loader,0):
-            inputs, targets = data
+            x, y = data
+
+            lam = np.random.beta(0.5, 0.5)
+            
+            # fix a bug here
+            # index = torch.randperm(x.size()[0]).cuda()
+            index = torch.randperm(x.size()[0])
+            inputs=lam * x + (1 - lam) * x[index, :]
+
+            targets_a, targets_b = y, y[index]
 
             inputs=inputs.to(device)
-            targets=targets.to(device)
+            targets_a=targets_a.to(device)
+            targets_b = targets_b.to(device)
+            
+            model_optimizer.zero_grad()     
+            #forward + backward+update
+            X,X_AE1,X_AE2,X_AE4=model(inputs.float())
 
-            model_optimizer.zero_grad()
 
-            X,XC,XDC=model(inputs.float())
+            loss=lam * my_loss(X, targets_a,inputs,X_AE1,X_AE2,X_AE4)+(1-lam)*my_loss(X, targets_b,inputs,X_AE1,X_AE2,X_AE4)
 
-            loss= my_loss(X, targets,XC,XDC,inputs)
 
             loss.backward()
             model_optimizer.step()   
@@ -533,9 +573,10 @@ def BERT_train(model,x_train,y_train,x_test,y_test,event_num,each_num_wei):
 
                 target=target.to(device)
 
-                X,XC,XDC=model(inputs.float())
+                X,X_AE1,X_AE2,X_AE4=model(inputs.float())
 
-                loss=my_loss(X, target, XC,XDC,inputs)
+
+                loss=my_loss(X, target, inputs, X_AE1, X_AE2, X_AE4)
                 testing_loss += loss.item()
         print('epoch [%d] loss: %.6f testing_loss: %.6f ' % (epoch+1,running_loss/len_train,testing_loss/len_test))
         sys.stdout.flush()
@@ -546,12 +587,13 @@ def BERT_train(model,x_train,y_train,x_test,y_test,event_num,each_num_wei):
         for batch_idx,data in enumerate(test_loader,0):
             inputs,_=data
             inputs=inputs.to(device)
-            X, _,_= model(inputs.float())
+            X, _, _, _ = model(inputs.float())
             pre_score =np.vstack((pre_score,F.softmax(X).cpu().numpy()))
     return pre_score
 
 
 # In[116]:
+
 
 def roc_aupr_score(y_true, y_score, average="macro"):
     def _binary_roc_aupr_score(y_true, y_score):
@@ -582,6 +624,8 @@ def evaluate(pred_type, pred_score, y_test, event_num):
     result_all = np.zeros((all_eval_type, 1), dtype=float)
     each_eval_type = 6
     result_eve = np.zeros((event_num, each_eval_type), dtype=float)
+    
+    # fix a bug here
     y_one_hot = label_binarize(y_test, classes=np.arange(event_num))
     pred_one_hot = label_binarize(pred_type, classes=np.arange(event_num))
 
@@ -615,11 +659,12 @@ def evaluate(pred_type, pred_score, y_test, event_num):
 # In[117]:
 
 
-def cross_val(feature,label,drugA,drugB,event_num,each_event_num):
+def cross_val(feature,label,drugA,drugB,event_num):
 
     y_true = np.array([])
     y_score = np.zeros((0, event_num), dtype=float)
     y_pred = np.array([])
+
 
     # cro val
     temp_drug1 = [[] for i in range(event_num)]
@@ -641,16 +686,11 @@ def cross_val(feature,label,drugA,drugB,event_num,each_event_num):
             else:
                 train_drug[i].append(dr_key)
 
-    each_event_num_sum = sum(each_event_num)
-    each_num_wei_dao = [each_event_num_sum / x for x in each_event_num]
-    each_num_wei_dao_sum = sum(each_num_wei_dao)
-    each_num_wei = [50*math.log(x / each_num_wei_dao_sum * 1000000) for x in each_num_wei_dao]
-    print(each_num_wei)
-    sys.stdout.flush()
 
+    
     for cross_ver in range(cross_ver_tim):
         
-        model=Model(len(feature[0]),bert_n_heads,bert_n_layers,event_num)
+        model=BERT(len(feature[0]),bert_n_heads,bert_n_layers,event_num)
 
         X_train = []
         X_test = []
@@ -679,8 +719,9 @@ def cross_val(feature,label,drugA,drugB,event_num,each_event_num):
         X_test = np.array(X_test)
         y_train = np.array(y_train)
         y_test = np.array(y_test)
+
         
-        pred_score=BERT_train(model,X_train,y_train,X_test,y_test,event_num,each_num_wei)
+        pred_score=BERT_train(model,X_train,y_train,X_test,y_test,event_num)
         
         pred_type = np.argmax(pred_score, axis=1)
         y_pred = np.hstack((y_pred, pred_type))
@@ -693,19 +734,58 @@ def cross_val(feature,label,drugA,drugB,event_num,each_event_num):
     return result_all, result_eve
 
 
+
+# In[118]:
+
+
+file_path="/data/dingli/mydata/KG-DDIBaselines/results/task2_MDF-SA-DDI/"
+
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("device: ", device)
+
+bert_n_heads=4
+bert_n_layers=4
+drop_out_rating=0.3
+batch_size=256
+len_after_AE=700
+learn_rating=0.000005
+epo_num=120
+cross_ver_tim=5
+cov2KerSize=50
+cov1KerSize=25
+calssific_loss_weight=5
+epoch_changeloss=epo_num//2
+weight_decay_rate=0.0001
+feature_list = ["smile","target","enzyme"]
+
+
+def save_result(filepath,result_type,result):
+    with open(filepath+result_type +'task2'+ '.csv', "w", newline='',encoding='utf-8') as csvfile:
+        writer = csv.writer(csvfile)
+        for i in result:
+            writer.writerow(i)
+    return 0
+
+
+# In[119]:
+
+
 def main():
     
-
+    # update here
+    conn = sqlite3.connect("/data/dingli/mydata/KG-DDIBaselines/datasets/event.db")
+    
+    df_drug = pd.read_sql('select * from drug;', conn)
+    extraction = pd.read_sql('select * from extraction;', conn)
     mechanism = extraction['mechanism']
     action = extraction['action']
     drugA = extraction['drugA']
     drugB = extraction['drugB']
     
     # update here
-    mutidataloader = MultiDataLoader(df_drug, mechanism, action, drugA, drugB)
-    new_feature, new_label, drugA, drugB, event_num, each_event_num = mutidataloader.feature, mutidataloader.label, mutidataloader.drugA, mutidataloader.drugB, mutidataloader.event_num, mutidataloader.each_event_num
-    
-    print("new_feature shape", new_feature.shape)
+    multidataloader = MultiDataLoader(df_drug, mechanism, action, drugA, drugB)
+    new_feature, new_label, drugA,drugB,event_num = multidataloader.feature, multidataloader.label, multidataloader.drugA, multidataloader.drugB, multidataloader.event_num
     
     np.random.seed(seed)
     np.random.shuffle(new_feature)
@@ -719,46 +799,15 @@ def main():
     sys.stdout.flush()
     
     start=time.time()
-    result_all, result_eve=cross_val(new_feature,new_label,drugA,drugB,event_num,each_event_num)
+    result_all, result_eve=cross_val(new_feature,new_label,drugA,drugB,event_num,)
     print("time used:", (time.time() - start) / 3600)
     sys.stdout.flush()
-    
     save_result(file_path,"all",result_all)
     save_result(file_path,"each",result_eve)
 
 
 # In[120]:
-def save_result(filepath,result_type,result):
-    with open(filepath+result_type +'task2_small'+ '.csv', "w", newline='',encoding='utf-8') as csvfile:
-        writer = csv.writer(csvfile)
-        for i in result:
-            writer.writerow(i)
-    return 0
 
-# update here
-file_path="/data/dingli/mydata/KG-DDIBaselines/results/task2_MDDI-SCL/"
-
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# update here
-conn = sqlite3.connect("/data/dingli/mydata/KG-DDIBaselines/datasets/event.db")
-df_drug = pd.read_sql('select * from drug;', conn)
-extraction = pd.read_sql('select * from extraction;', conn)
-
-label_smoothing=0.3
-con_loss_T=0.05
-learn_rating=0.00002
-batch_size=512
-epo_num=120
-epoch_changeloss=epo_num//3
-
-bert_n_heads=4
-bert_n_layers=2
-drop_out_rating=0.5
-cross_ver_tim=5
-weight_decay_rate=0.0001
-feature_list = ["smile","target","enzyme","pathway"]
 
 main()
 
